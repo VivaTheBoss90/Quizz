@@ -11,8 +11,8 @@
 // - handleNextBuzz(correct) => +5, stopMusic, isGameStarted reste true,
 //                              buzzActive = false, 3s => nextSong => buzzActive = true
 ////////////////////////////////////////////////////////////////////////////////
-require('dotenv').config();
 const path = require('path');
+require('dotenv').config({ path: path.join(__dirname, '.env') });
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
