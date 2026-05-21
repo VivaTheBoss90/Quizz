@@ -51,6 +51,12 @@ db.getConnection((err, connection) => {
   } else {
     console.log('Connecté à MySQL !');
     connection.release();
+    // Charger les parties actives en mémoire (si migrations appliquées)
+    try {
+      loadActiveParties();
+    } catch (e) {
+      console.warn('loadActiveParties failed (maybe migrations not applied):', e.message || e);
+    }
   }
 });
 
@@ -72,6 +78,35 @@ const partyStates = {
 //   buzzActive: false
 // }
 };
+
+// Charger les parties actives et leur playlist depuis la BDD
+function loadActiveParties() {
+  const sql = `SELECT id, is_game_started, current_song_index, buzz_active FROM parties WHERE finished = 0`;
+  db.query(sql, [], (err, rows) => {
+    if (err) {
+      console.error('Erreur loadActiveParties:', err);
+      return;
+    }
+    rows.forEach((p) => {
+      const pid = p.id;
+      partyStates[pid] = {
+        isGameStarted: Boolean(p.is_game_started),
+        currentSongIndex: p.current_song_index || 0,
+        buzzActive: Boolean(p.buzz_active)
+      };
+
+      // Charger playlist sauvegardée
+      const sqlSongs = `SELECT s.id, s.title, s.mp3_url FROM party_songs ps JOIN songs s ON ps.song_id = s.id WHERE ps.party_id = ? ORDER BY ps.song_order ASC`;
+      db.query(sqlSongs, [pid], (err2, songRows) => {
+        if (err2) {
+          console.error('Erreur loadActiveParties songs:', err2);
+          return;
+        }
+        partySongs[pid] = songRows;
+      });
+    });
+  });
+}
 
 // 5) Routes
 app.get('/', (req, res) => {
@@ -170,6 +205,14 @@ app.post('/api/parties/create', (req, res) => {
 
       partySongs[newPartyId] = songResults;
 
+      // Persister la playlist dans party_songs
+      if (songResults && songResults.length > 0) {
+        const values = songResults.map((s, idx) => [newPartyId, s.id, idx]);
+        const insertPS = `INSERT INTO party_songs (party_id, song_id, song_order) VALUES ?`;
+        db.query(insertPS, [values], (err3) => {
+          if (err3) console.error('Erreur insert party_songs:', err3);
+        });
+      }
       // On init l'état
       partyStates[newPartyId] = {
         isGameStarted: false,
@@ -343,6 +386,11 @@ io.on('connection', (socket) => {
     partyStates[partyId].currentSongIndex = 0;
     partyStates[partyId].buzzActive = true;
 
+    // Persister l'état de la partie
+    db.query('UPDATE parties SET is_game_started = 1, current_song_index = 0, buzz_active = 1 WHERE id = ?', [partyId], (uErr) => {
+      if (uErr) console.error('Erreur update startGame:', uErr);
+    });
+
     // avertir tout le monde => GM peut disable le bouton
     io.to(`party_${partyId}`).emit('gameStateUpdated', { isGameStarted: true });
 
@@ -391,6 +439,13 @@ io.on('connection', (socket) => {
     const firstPlayerId = buzzQueues[partyId][0];
 
     if (correct) {
+      // Désactiver le buzz pendant l'annonce et persister
+      if (partyStates[partyId]) {
+        partyStates[partyId].buzzActive = false;
+        db.query('UPDATE parties SET buzz_active = 0 WHERE id = ?', [partyId], (uerr) => {
+          if (uerr) console.error('Erreur update buzz_active (handleNextBuzz):', uerr);
+        });
+      }
       // 1) Effectuer l’UPDATE SQL + SELECT
       db.query('UPDATE players SET score=score+5 WHERE id=?', [firstPlayerId], (err1, res1) => {
         if (!err1) {
@@ -454,6 +509,10 @@ io.on('connection', (socket) => {
 
     // plus de buzz
     partyStates[partyId].buzzActive = false;
+    // Persister buzz_active
+    db.query('UPDATE parties SET buzz_active = 0 WHERE id = ?', [partyId], (err) => {
+      if (err) console.error('Erreur update buzz_active (handleNoAnswer):', err);
+    });
     io.to(`party_${partyId}`).emit('stopMusic');
 
     buzzQueues[partyId] = [];
@@ -531,6 +590,10 @@ function startSong(partyId) {
   } else {
     // On réactive le buzz
     st.buzzActive = true;
+    // Persister buzzActive
+    db.query('UPDATE parties SET buzz_active = 1 WHERE id = ?', [partyId], (err) => {
+      if (err) console.error('Erreur update buzz_active (startSong):', err);
+    });
     io.to(`party_${partyId}`).emit('songChanged', { index: idx, song: s });
   }
 }
@@ -545,6 +608,10 @@ function nextSong(partyId) {
     io.to(`party_${partyId}`).emit('partyFinished', {});
   } else {
     st.buzzActive = true; // re-autoriser le buzz pour la nouvelle chanson
+    // Persister index + buzz
+    db.query('UPDATE parties SET current_song_index = ?, buzz_active = 1 WHERE id = ?', [idx, partyId], (err) => {
+      if (err) console.error('Erreur update nextSong:', err);
+    });
     const s = arr[idx];
     io.to(`party_${partyId}`).emit('songChanged', { index: idx, song: s });
   }
