@@ -5,3 +5,4 @@ dist
 build
 MP3/
 *.zip
+.vscode
